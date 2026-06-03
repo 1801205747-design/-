@@ -1,0 +1,137 @@
+import pybullet as p
+import pybullet_data
+import time
+import numpy as np
+
+# ====================== 1. 初始化仿真环境 ======================
+# 连接物理引擎（GUI=可视化模式，DIRECT=后台模式）
+physicsClient = p.connect(p.GUI)
+# 设置重力（竖直向下9.81）
+p.setGravity(0, 0, -9.81)
+# 加载PyBullet自带模型路径
+p.setAdditionalSearchPath(pybullet_data.getDataPath())
+# 加载地面平面
+planeId = p.loadURDF("plane.urdf")
+
+# 设置仿真步长（固定时间步，提升稳定性）
+p.setTimeStep(1/240)
+p.setRealTimeSimulation(0)
+
+# ====================== 2. 加载机械臂与物体 ======================
+# 加载Franka Panda机械臂（初始位置）
+robotStartPos = [0, 0, 0]
+robotStartOrn = p.getQuaternionFromEuler([0, 0, 0])
+robotId = p.loadURDF("franka_panda/panda.urdf", robotStartPos, robotStartOrn, useFixedBase=True)
+
+# 获取机械臂关键索引（末端执行器、夹爪关节）
+endEffectorIndex = 11  # 末端执行器关节索引
+leftFingerIndex = 9    # 左夹爪
+rightFingerIndex = 10  # 右夹爪
+# 所有可动关节索引
+armJointIndices = [0,1,2,3,4,5,6]
+gripperJointIndices = [9,10]
+
+# 加载目标方块（待抓取物体）
+boxStartPos = [0.5, 0, 0.1]
+boxStartOrn = p.getQuaternionFromEuler([0,0,0])
+boxId = p.loadURDF("cube.urdf", boxStartPos, boxStartOrn, globalScaling=0.1)
+
+# ====================== 3. 核心功能函数 ======================
+def calculate_ik(target_pos, target_orn=None):
+    """
+    逆运动学求解器：输入目标坐标 → 输出机械臂关节角度
+    :param target_pos: 末端目标位置 [x,y,z]
+    :param target_orn: 末端目标姿态（四元数）
+    :return: 机械臂7个关节的目标角度
+    """
+    if target_orn is None:
+        # 默认姿态：末端向下
+        target_orn = p.getQuaternionFromEuler([np.pi, 0, 0])
+    
+    # PyBullet内置IK求解
+    joint_angles = p.calculateInverseKinematics(
+        bodyUniqueId=robotId,
+        endEffectorLinkIndex=endEffectorIndex,
+        targetPosition=target_pos,
+        targetOrientation=target_orn,
+        maxNumIterations=100,
+        residualThreshold=1e-5
+    )
+    # 只返回机械臂7个关节的角度
+    return joint_angles[:7]
+
+def move_arm(target_joint_angles, step=200):
+    """
+    关节控制器：平滑移动机械臂到目标角度
+    """
+    for _ in range(step):
+        p.setJointMotorControlArray(
+            bodyUniqueId=robotId,
+            jointIndices=armJointIndices,
+            controlMode=p.POSITION_CONTROL,
+            targetPositions=target_joint_angles,
+            forces=[100]*7  # 关节控制力
+        )
+        p.stepSimulation()
+        time.sleep(1/240)
+
+def control_gripper(open_flag=True, step=100):
+    """
+    夹爪控制器：打开/关闭夹爪
+    :param open_flag: True=打开，False=关闭
+    """
+    target_pos = 0.04 if open_flag else 0.0  # 打开=0.04m，关闭=0.0m
+    for _ in range(step):
+        p.setJointMotorControlArray(
+            bodyUniqueId=robotId,
+            jointIndices=gripperJointIndices,
+            controlMode=p.POSITION_CONTROL,
+            targetPositions=[target_pos]*2,
+            forces=[50]*2
+        )
+        p.stepSimulation()
+        time.sleep(1/240)
+
+# ====================== 4. 执行抓取流程 ======================
+if __name__ == "__main__":
+    print("=== PyBullet 机械臂抓取仿真启动 ===")
+    
+    # 1. 初始化：打开夹爪
+    control_gripper(open_flag=True)
+    time.sleep(0.5)
+
+    # 2. 移动到物体上方（安全位置）
+    above_pos = [0.5, 0, 0.3]
+    above_joints = calculate_ik(above_pos)
+    move_arm(above_joints)
+    time.sleep(0.5)
+
+    # 3. 移动到物体抓取位置
+    grasp_pos = [0.5, 0, 0.12]
+    grasp_joints = calculate_ik(grasp_pos)
+    move_arm(grasp_joints)
+    time.sleep(0.5)
+
+    # 4. 关闭夹爪，抓取物体
+    control_gripper(open_flag=False)
+    time.sleep(0.5)
+
+    # 5. 提升物体（回到上方位置）
+    move_arm(above_joints)
+    time.sleep(0.5)
+
+    # 6. 移动到目标放置位置
+    target_pos = [0.2, 0.3, 0.3]
+    target_joints = calculate_ik(target_pos)
+    move_arm(target_joints)
+    time.sleep(0.5)
+
+    # 7. 打开夹爪，放置物体
+    control_gripper(open_flag=True)
+    time.sleep(1)
+
+    print("=== 抓取任务完成 ===")
+    # 保持仿真窗口
+    while p.isConnected():
+        p.stepSimulation()
+        time.sleep(1/240)
